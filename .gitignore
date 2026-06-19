@@ -1,0 +1,45 @@
+# ── Terraform ────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# ── Credentials / secrets ───────────────────────────────────
+*.pem
+*.key
+.env
+.env.*
+**/credentials
+**/.aws/
+secrets.json
+
+# ── Databricks ───────────────────────────────────────────────
+.databricks/
+*.dbc
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+*.egg-info/
+.pytest_cache/
+
+# ── Data (generated, not source) ────────────────────────────
+data/sample/*.json
+!data/sample/.gitkeep
+
+# ── OS / Editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

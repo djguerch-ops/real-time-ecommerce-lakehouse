@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "event_ts",
+    "user_id",
+    "session_id",
+    "device_type",
+    "country",
+    "currency"
+  ],
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "enum": ["page_view", "add_to_cart", "order_created"]
+    },
+    "event_ts": { "type": "string" },
+    "user_id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "product_id": { "type": ["string", "null"] },
+    "order_id": { "type": ["string", "null"] },
+    "device_type": {
+      "type": "string",
+      "enum": ["mobile", "desktop", "tablet"]
+    },
+    "country": { "type": "string" },
+    "amount": { "type": ["number", "null"] },
+    "currency": { "type": "string" }
+  }
+}

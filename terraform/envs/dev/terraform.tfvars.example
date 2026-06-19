@@ -1,0 +1,3 @@
+aws_region              = "eu-west-1"
+raw_bucket_name         = "your-raw-bucket-name"
+checkpoints_bucket_name = "your-checkpoints-bucket-name"
