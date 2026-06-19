@@ -2,9 +2,24 @@
 
 A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Catalog**, simulating an e-commerce event stream and turning raw JSON events into business-ready KPIs.
 
-> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard.
+> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion with Kinesis + Lambda implemented; CI/CD, governance and observability planned.
+
+## 📑 Contents
+
+| | Section | Status |
+|---|---|---|
+| 🟢 | [V1 — Batch Lakehouse](#-v1--batch-lakehouse) | ✅ Complete |
+| 🔵 | [V2 — Real-time Ingestion](#-v2--real-time-ingestion-kinesis--lambda) | 🚧 In progress |
+| 🔵 | [V2 — Planned Enhancements](#v2--planned-enhancements) | ⬜ Planned |
 
 ---
+
+## 🟢 V1 — Batch Lakehouse
+
+Everything below — architecture, data model, pipeline, dashboard — describes the **V1 batch
+pipeline**: a Python script drops a file in S3, Databricks Auto Loader picks it up on demand.
+This is the complete, working baseline. V2 (real-time ingestion) is documented further down
+and builds on top of it without modifying it.
 
 ## Architecture
 
@@ -66,34 +81,43 @@ Full schema: [`src/event_generator/ecommerce_event.json`](src/event_generator/ec
 
 ## Project structure
 
+**V1 (batch) — complete:**
 ```
 real-time-ecommerce-lakehouse/
-├── data/
-│   └── sample/
-│       └── events.json              # Generated sample events
+├── data/sample/events.json
 ├── src/
 │   ├── event_generator/
-│   │   ├── producer.py              # Event generator
-│   │   └── ecommerce_event.json     # JSON schema
+│   │   ├── producer.py
+│   │   └── ecommerce_event.json
 │   └── databricks/
-│       ├── bronze/
-│       │   └── 01_bronze_ingestion.py
-│       ├── silver/
-│       │   └── 02_silver_transform.py
-│       └── gold/
-│           └── 03_gold_kpi.py
-├── terraform/
-│   └── envs/
-│       └── dev/
-│           ├── main.tf
-│           ├── variables.tf
-│           └── terraform.tfvars
+│       ├── bronze/01_bronze_ingestion.py
+│       ├── silver/02_silver_transform.py
+│       └── gold/03_gold_kpi.py
+├── terraform/envs/dev/
+│   ├── main.tf
+│   ├── variables.tf
+│   └── terraform.tfvars.example
 └── README.md
+```
+
+**V2 (streaming) — additive, on top of the structure above:**
+```
+real-time-ecommerce-lakehouse/
+├── src/
+│   ├── event_generator/
+│   │   └── producer_streaming.py            # NEW — streams to Kinesis
+│   ├── lambda/
+│   │   └── kinesis_to_s3/handler.py         # NEW — Kinesis consumer
+│   └── databricks/
+│       └── bronze/04_bronze_streaming_ingestion.py  # NEW
+└── terraform/envs/dev/
+    ├── streaming.tf                          # NEW — Kinesis + Lambda + IAM
+    └── streaming_variables.tf                # NEW
 ```
 
 ---
 
-## Pipeline details
+## Pipeline details (V1)
 
 ### 1. Event generation
 
@@ -159,7 +183,7 @@ A Databricks SQL Dashboard with 4 visualizations built on the Gold tables:
 
 ---
 
-## Key results (sample run, 1000 events)
+## Key results (V1, sample run, 1000 events)
 
 | Metric | Value |
 |---|---|
@@ -183,19 +207,104 @@ ACID transactions, schema enforcement, and time travel are available out of the 
 
 ---
 
+## 🔵 V2 — Real-time ingestion (Kinesis + Lambda)
+
+> Everything from here on is **V2** — additive on top of V1, nothing above this point was modified.
+
+V2 replaces the manual file-drop pattern with an event-driven ingestion path, while keeping
+the V1 batch pipeline untouched for comparison.
+
+```
+producer_streaming.py → Kinesis Data Stream → Lambda → S3 (streaming/)
+        → Auto Loader → formation.bronze.events_streaming
+```
+
+### What was built
+
+- **Kinesis Data Stream** (`rtl-dev-events-stream`) — receives one record per event, in real time
+- **Lambda** (`rtl-dev-kinesis-to-s3`) — triggered automatically by Kinesis via an event source
+  mapping (`batch_size=100`, `maximum_batching_window=5s`); decodes each batch and writes it as
+  newline-delimited JSON to `s3://.../streaming/events/date=YYYY-MM-DD/`
+- All infrastructure is provisioned in [`terraform/envs/dev/streaming.tf`](terraform/envs/dev/streaming.tf),
+  with IAM permissions scoped to the Kinesis stream and the `streaming/` prefix only — same
+  least-privilege principle used for the Databricks ↔ S3 connection
+- A new notebook, [`04_bronze_streaming_ingestion`](src/databricks/bronze/04_bronze_streaming_ingestion.py),
+  reads from this new prefix into a dedicated Bronze table, so V1 (batch) and V2 (streaming)
+  results can be inspected side by side
+
+### Ingestion latency: two honest layers
+
+This pipeline has **two different latencies**, and it's worth being explicit about both:
+
+| Hop | Latency | Real-time? |
+|---|---|---|
+| Producer → Kinesis → Lambda → S3 | ~5 seconds | ✅ Yes — events land in S3 within seconds of being generated |
+| S3 → Auto Loader → Bronze | On-demand (`trigger(availableNow=True)`) | ❌ No — only runs when the notebook is manually executed |
+
+The first hop is genuinely event-driven. The second hop, as configured, is still **batch-style
+on-demand processing**: Auto Loader picks up whatever has accumulated in S3 since the last run,
+then stops.
+
+### Making the second hop real-time too
+
+Auto Loader supports a continuous trigger that keeps the stream running indefinitely, polling
+for new files every few seconds instead of running once and stopping:
+
+```python
+query = (
+    df_bronze_streaming
+    .writeStream
+    .format("delta")
+    .outputMode("append")
+    .option("checkpointLocation", checkpoint_path)
+    .option("mergeSchema", "true")
+    .trigger(processingTime="10 seconds")   # <- continuous, instead of availableNow=True
+    .toTable("formation.bronze.events_streaming")
+)
+```
+
+This was tested directly: with this trigger active, the cluster keeps the stream alive and
+ingests new files within ~10 seconds of Lambda writing them — genuinely real-time, end to end.
+
+**Why it isn't run this way by default in this project:** a continuous trigger requires the
+Databricks cluster to stay **running permanently**, since the streaming query never terminates.
+On a dev/demo project, that means paying for compute 24/7 to process a trickle of simulated
+events — a cost that isn't justified outside of latency-critical use cases (e.g. fraud detection).
+
+**What this would look like with `processingTime="10 seconds"` running continuously**, simulated
+from the actual test:
+
+```
+22:58:48  Lambda writes batch (23 events) → s3://.../date=2026-06-19/9afc...json
+22:58:58  Auto Loader picks it up (within 10s) → formation.bronze.events_streaming (+23 rows)
+22:59:02  Lambda writes batch (25 events) → s3://.../date=2026-06-19/f4f4...json
+22:59:12  Auto Loader picks it up (within 10s) → formation.bronze.events_streaming (+25 rows)
+...
+```
+
+**What's used instead, and why it's a reasonable trade-off for this project:** `trigger(availableNow=True)`,
+run on demand (or schedulable via a Databricks Job every 1-2 minutes for a "near real-time"
+middle ground without 24/7 compute cost). This keeps the demonstrated architecture fully
+production-realistic — the continuous-trigger code above is the only line that would change to
+flip it to true real-time — without paying for an idle cluster.
+
+---
+
 ## V2 — Planned enhancements
 
-- **Kinesis + Lambda** — real-time event-driven ingestion, replacing the file-drop pattern
+- ~~Kinesis + Lambda — real-time event-driven ingestion~~ ✅ Done (see above)
 - **CI/CD** — GitHub Actions + Databricks Asset Bundles for automated deployment
 - **Advanced governance** — Unity Catalog ACLs, data lineage
 - **Delta Live Tables** — declarative pipelines with data quality expectations
 - **Observability** — pipeline monitoring, freshness SLAs, alerting
+- **Scheduled near-real-time** — Databricks Job running the streaming Bronze notebook every
+  1-2 minutes, as a cost-conscious middle ground between on-demand batch and 24/7 streaming
 
 ---
 
 ## Tech stack
 
-`AWS S3` · `AWS IAM` · `Databricks` · `Unity Catalog` · `Delta Lake` · `Auto Loader` · `PySpark` · `Databricks SQL` · `Terraform` · `Python`
+`AWS S3` · `AWS IAM` · `AWS Kinesis` · `AWS Lambda` · `Databricks` · `Unity Catalog` · `Delta Lake` · `Auto Loader` · `PySpark` · `Databricks SQL` · `Terraform` · `Python`
 
 ---
 

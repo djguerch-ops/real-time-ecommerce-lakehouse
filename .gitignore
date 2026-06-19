@@ -22,6 +22,10 @@ secrets.json
 .databricks/
 *.dbc
 
+# ── Lambda build artifacts ──────────────────────────────────
+**/build/
+*.zip
+
 # ── Python ───────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
