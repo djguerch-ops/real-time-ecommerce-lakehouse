@@ -2,7 +2,7 @@
 
 A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Catalog**, simulating an e-commerce event stream and turning raw JSON events into business-ready KPIs.
 
-> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion (Kinesis + Lambda), CI/CD (GitHub Actions + Terraform), and dual orchestration (Databricks Job + Delta Live Tables) implemented; advanced governance and observability planned.
+> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion (Kinesis + Lambda), CI/CD (GitHub Actions + Terraform), dual orchestration (Databricks Job + Delta Live Tables), and observability (alerting + freshness monitoring) implemented; advanced governance planned.
 
 ## 📑 Contents
 
@@ -12,6 +12,7 @@ A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Cat
 | 🔵 | [V2 — Real-time Ingestion](#-v2--real-time-ingestion-kinesis--lambda) | ✅ Complete |
 | 🟣 | [V2 — CI/CD](#-v2--cicd-github-actions--terraform) | ✅ Complete |
 | 🟠 | [V2 — Orchestration: Job vs DLT](#-v2--orchestration-databricks-job-vs-delta-live-tables) | ✅ Complete |
+| 🔴 | [V2 — Observability](#-v2--observability-alerting--data-freshness-monitoring) | ✅ Complete |
 | 🔵 | [V2 — Planned Enhancements](#v2--planned-enhancements) | ⬜ Planned |
 
 ---
@@ -140,6 +141,18 @@ real-time-ecommerce-lakehouse/
 *(The Databricks Job `ecommerce-pipeline-v1` is configured directly in the Databricks UI —
 chaining the existing `01_bronze_ingestion` → `02_silver_transform` → `03_gold_kpi` notebooks
 with no code changes — so it has no corresponding file in this repo.)*
+
+**V2 (observability) — additive, on top of the structure above:**
+```
+real-time-ecommerce-lakehouse/
+└── src/
+    └── databricks/
+        └── monitoring/
+            └── data_freshness_monitoring.py   # NEW — 4th task in ecommerce-pipeline-v1,
+                                                 #       checks Bronze/Silver freshness
+```
+*(Job failure email notifications are configured directly in the Databricks Job UI —
+no corresponding file in this repo.)*
 
 ---
 
@@ -453,13 +466,83 @@ equivalent, differing only in how they're built and what they track.
 
 ---
 
+## 🔴 V2 — Observability (alerting + data freshness monitoring)
+
+> Additive on top of V1 and the Databricks Job orchestration above — adds visibility into
+> whether the pipeline is healthy, not just whether it ran.
+
+A pipeline that runs without errors isn't necessarily healthy — it might be processing stale
+or empty data without anyone noticing. This section adds two complementary checks: did the job
+fail, and is the data itself actually fresh.
+
+### Failure alerting
+
+`ecommerce-pipeline-v1` has an **on-failure email notification** configured directly in the
+Databricks Job UI — no custom code required. This was tested directly: an early version of
+the monitoring task below failed with a timestamp parsing error, and the failure email arrived
+automatically within seconds, confirming the alert path works end-to-end rather than just
+being configured and untested.
+
+### Data freshness monitoring
+
+[`src/databricks/monitoring/data_freshness_monitoring.py`](src/databricks/monitoring/data_freshness_monitoring.py)
+runs as the 4th task in the pipeline, after `gold_kpi`:
+
+```
+bronze_ingestion → silver_transform → gold_kpi → monitoring
+```
+
+For each monitored layer (Bronze, Silver), it checks the **actual most recent event timestamp
+present in the data** — not just "did the notebook run" — and classifies freshness:
+
+```python
+FRESHNESS_OK_DAYS = 14
+FRESHNESS_WARNING_DAYS = 30
+# status = OK / WARNING / STALE based on hours since the last event in the table
+```
+
+Results are **appended** (not overwritten) to `formation.monitoring.data_freshness`, building a
+history of freshness checks over time rather than just the latest snapshot. If any layer comes
+back `STALE`, the task raises an exception — which fails the Job task and triggers the
+email alert already configured above.
+
+**Why the thresholds are generous (14/30 days, not 24/48 hours):** this project's source data
+is generated manually via `producer.py`, not on a continuous schedule — tight hourly thresholds
+would constantly false-alarm on a dataset that's intentionally static between manual runs. A
+production system with a real continuous source (e.g. the Kinesis pipeline above) would use
+much tighter thresholds, closer to 24h/48h.
+
+**Proof this actually works**, captured from two consecutive runs:
+
+| checked_at | layer | hours_since_last_event | status |
+|---|---|---|---|
+| 2026-06-20 21:28:44 | Bronze | 164.34 | ❌ STALE *(old 48h threshold, before the fix)* |
+| 2026-06-20 21:28:44 | Silver | 164.34 | ❌ STALE *(old 48h threshold, before the fix)* |
+| 2026-06-20 21:36:52 | Bronze | 164.47 | ✅ OK *(new 30-day threshold)* |
+| 2026-06-20 21:36:52 | Silver | 164.47 | ✅ OK *(new 30-day threshold)* |
+
+The first run's `STALE` status triggered a real failure email — visible proof the alert isn't
+just configured, it actually fires.
+
+### What this demonstrates
+
+- Distinguishing "the job succeeded" from "the data is actually healthy" — a job can run
+  clean and still process stale or empty input
+- A freshness check based on data content (`event_ts`), not job execution time, which would
+  miss a source that's silently gone quiet
+- An alert path that was triggered and verified, not just configured and assumed to work
+- Historized monitoring data (`append`, not `overwrite`) enabling trend analysis over time
+
+---
+
 ## V2 — Planned enhancements
 
 - ~~Kinesis + Lambda — real-time event-driven ingestion~~ ✅ Done (see above)
 - ~~CI/CD — GitHub Actions + Terraform automated deployment~~ ✅ Done (see above)
 - ~~Delta Live Tables — declarative pipelines with data quality expectations~~ ✅ Done (see above)
-- **Advanced governance** — Unity Catalog ACLs, data lineage
-- **Observability** — pipeline monitoring, freshness SLAs, alerting
+- ~~Observability — pipeline monitoring, freshness checks, alerting~~ ✅ Done (see above)
+- **Advanced governance** — Unity Catalog ACLs, data lineage *(most valuable with multiple
+  users/teams accessing the catalog — limited demo value as a single-user project)*
 - **Scheduled near-real-time** — Databricks Job running the streaming Bronze notebook every
   1-2 minutes, as a cost-conscious middle ground between on-demand batch and 24/7 streaming
 - **Databricks Asset Bundles (DAB)** — automate notebook and DLT pipeline deployment as part
