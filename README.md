@@ -2,7 +2,7 @@
 
 A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Catalog**, simulating an e-commerce event stream and turning raw JSON events into business-ready KPIs.
 
-> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion (Kinesis + Lambda) and CI/CD (GitHub Actions + Terraform) implemented; governance and observability planned.
+> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion (Kinesis + Lambda), CI/CD (GitHub Actions + Terraform), and dual orchestration (Databricks Job + Delta Live Tables) implemented; advanced governance and observability planned.
 
 ## 📑 Contents
 
@@ -11,6 +11,7 @@ A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Cat
 | 🟢 | [V1 — Batch Lakehouse](#-v1--batch-lakehouse) | ✅ Complete |
 | 🔵 | [V2 — Real-time Ingestion](#-v2--real-time-ingestion-kinesis--lambda) | ✅ Complete |
 | 🟣 | [V2 — CI/CD](#-v2--cicd-github-actions--terraform) | ✅ Complete |
+| 🟠 | [V2 — Orchestration: Job vs DLT](#-v2--orchestration-databricks-job-vs-delta-live-tables) | ✅ Complete |
 | 🔵 | [V2 — Planned Enhancements](#v2--planned-enhancements) | ⬜ Planned |
 
 ---
@@ -126,6 +127,19 @@ real-time-ecommerce-lakehouse/
     ├── backend.tf                            # NEW — remote S3 state backend
     └── cicd_oidc.tf                          # NEW — OIDC provider + IAM role for GitHub Actions
 ```
+
+**V2 (orchestration) — additive, on top of the structure above:**
+```
+real-time-ecommerce-lakehouse/
+└── src/
+    └── databricks/
+        └── dlt/
+            └── dlt_pipeline.py                # NEW — declarative Bronze/Silver/Gold with
+                                                 #       data quality expectations
+```
+*(The Databricks Job `ecommerce-pipeline-v1` is configured directly in the Databricks UI —
+chaining the existing `01_bronze_ingestion` → `02_silver_transform` → `03_gold_kpi` notebooks
+with no code changes — so it has no corresponding file in this repo.)*
 
 ---
 
@@ -374,16 +388,82 @@ changes from an unreviewed branch would defeat the purpose of having a review pr
 
 ---
 
+## 🟠 V2 — Orchestration: Databricks Job vs Delta Live Tables
+
+> Additive on top of V1 — same Bronze/Silver/Gold logic, demonstrated through **two different
+> orchestration approaches** on purpose, to compare them directly.
+
+### Approach 1 — Databricks Job
+
+The simplest way to schedule an *existing* pipeline: the three V1 notebooks
+(`01_bronze_ingestion` → `02_silver_transform` → `03_gold_kpi`) are chained as tasks in a
+Databricks Job (`ecommerce-pipeline-v1`), with dependencies declared explicitly in the Job UI.
+
+```
+bronze_ingestion → silver_transform → gold_kpi
+```
+
+No code changes required — this works with any notebook as-is. The developer is responsible
+for declaring the task order; if a new table were added downstream, its dependency would need
+to be added manually.
+
+### Approach 2 — Delta Live Tables (DLT)
+
+The same logic, rewritten declaratively in
+[`src/databricks/dlt/dlt_pipeline.py`](src/databricks/dlt/dlt_pipeline.py). Tables are defined
+as `@dlt.table` functions; DLT **infers the dependency graph automatically** from the code —
+when `dlt_silver_events` calls `dlt.read("dlt_bronze_events")`, DLT understands the ordering
+without any manual task configuration.
+
+The key addition over the Job approach is **declarative data quality**:
+
+```python
+@dlt.table(name="dlt_silver_events", table_properties={"quality": "silver"})
+@dlt.expect_or_drop("valid_event_type", "event_type IN ('page_view', 'add_to_cart', 'order_created')")
+@dlt.expect_or_drop("valid_device_type", "device_type IN ('mobile', 'desktop', 'tablet')")
+@dlt.expect_or_drop("non_null_user_id", "user_id IS NOT NULL")
+@dlt.expect_or_drop("non_null_timestamp", "event_ts IS NOT NULL")
+@dlt.expect_or_drop("order_has_amount", "event_type != 'order_created' OR amount IS NOT NULL")
+@dlt.expect_or_drop("positive_amount", "amount IS NULL OR amount > 0")
+def dlt_silver_events():
+    return dlt.read_stream("dlt_bronze_events")...
+```
+
+Six quality rules are enforced inline. Any row violating one is automatically dropped *before*
+reaching Silver — and unlike a manual `.filter()` (which silently discards rows), DLT tracks
+**exactly how many rows passed or failed each individual rule**, visible in a built-in
+dashboard with zero custom logging code.
+
+Tables live in a separate schema (`formation.dlt`) with a `dlt_` prefix, so this pipeline runs
+independently without touching the V1 tables.
+
+### Side-by-side comparison
+
+| | Databricks Job | DLT Pipeline |
+|---|---|---|
+| Orchestration | Manual — developer declares task order | Automatic — inferred from code |
+| Code reuse | Existing notebooks, unmodified | Rewritten using `@dlt.table` syntax |
+| Data quality tracking | None built-in (would require custom code) | Native — pass/drop counts per rule |
+| Tested result | ✅ Succeeded, 1m17s, all 3 tasks green | ✅ Completed — Bronze 1K rows (1 expectation met), Silver 1K rows (6 expectations met, 0 dropped) |
+| Best fit | Quick scheduling of an existing pipeline | Pipelines where data quality must be enforced and audited |
+
+Both were run end-to-end against the same source data, producing matching results (e.g. 943
+users in `conversion_rate` either way) — confirming the two approaches are functionally
+equivalent, differing only in how they're built and what they track.
+
+---
+
 ## V2 — Planned enhancements
 
 - ~~Kinesis + Lambda — real-time event-driven ingestion~~ ✅ Done (see above)
 - ~~CI/CD — GitHub Actions + Terraform automated deployment~~ ✅ Done (see above)
+- ~~Delta Live Tables — declarative pipelines with data quality expectations~~ ✅ Done (see above)
 - **Advanced governance** — Unity Catalog ACLs, data lineage
-- **Delta Live Tables** — declarative pipelines with data quality expectations
 - **Observability** — pipeline monitoring, freshness SLAs, alerting
 - **Scheduled near-real-time** — Databricks Job running the streaming Bronze notebook every
   1-2 minutes, as a cost-conscious middle ground between on-demand batch and 24/7 streaming
-- **Databricks Asset Bundles (DAB)** — automate notebook deployment as part of the CI/CD pipeline
+- **Databricks Asset Bundles (DAB)** — automate notebook and DLT pipeline deployment as part
+  of the CI/CD pipeline
 
 ---
 
