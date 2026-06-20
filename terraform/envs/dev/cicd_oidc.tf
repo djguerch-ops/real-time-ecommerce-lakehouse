@@ -154,13 +154,24 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "lambda:DeleteFunction",
           "lambda:TagResource",
           "lambda:ListTags",
-          "lambda:ListVersionsByFunction",
+          "lambda:ListVersionsByFunction"
+        ]
+        Resource = "arn:aws:lambda:*:*:function:rtl-dev-*"
+      },
+      {
+        Sid    = "LambdaEventSourceMapping"
+        Effect = "Allow"
+        Action = [
           "lambda:CreateEventSourceMapping",
           "lambda:DeleteEventSourceMapping",
           "lambda:GetEventSourceMapping",
-          "lambda:UpdateEventSourceMapping"
+          "lambda:UpdateEventSourceMapping",
+          "lambda:ListEventSourceMappings"
         ]
-        Resource = "arn:aws:lambda:*:*:function:rtl-dev-*"
+        # Event source mappings are a distinct resource type from
+        # Lambda functions, with their own ARN format — they can't
+        # be scoped by function name, only by account/region.
+        Resource = "arn:aws:lambda:*:*:event-source-mapping:*"
       },
       {
         Sid    = "IAMForProjectRoles"
