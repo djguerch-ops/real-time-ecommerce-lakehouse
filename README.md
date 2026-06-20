@@ -2,14 +2,15 @@
 
 A production-style lakehouse pipeline built on **AWS S3 + Databricks + Unity Catalog**, simulating an e-commerce event stream and turning raw JSON events into business-ready KPIs.
 
-> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion with Kinesis + Lambda implemented; CI/CD, governance and observability planned.
+> **Status:** V1 complete ✅ — batch ingestion with Auto Loader, medallion architecture (Bronze/Silver/Gold), and a live SQL dashboard. **V2 in progress 🚧** — real-time ingestion (Kinesis + Lambda) and CI/CD (GitHub Actions + Terraform) implemented; governance and observability planned.
 
 ## 📑 Contents
 
 | | Section | Status |
 |---|---|---|
 | 🟢 | [V1 — Batch Lakehouse](#-v1--batch-lakehouse) | ✅ Complete |
-| 🔵 | [V2 — Real-time Ingestion](#-v2--real-time-ingestion-kinesis--lambda) | 🚧 In progress |
+| 🔵 | [V2 — Real-time Ingestion](#-v2--real-time-ingestion-kinesis--lambda) | ✅ Complete |
+| 🟣 | [V2 — CI/CD](#-v2--cicd-github-actions--terraform) | ✅ Complete |
 | 🔵 | [V2 — Planned Enhancements](#v2--planned-enhancements) | ⬜ Planned |
 
 ---
@@ -113,6 +114,17 @@ real-time-ecommerce-lakehouse/
 └── terraform/envs/dev/
     ├── streaming.tf                          # NEW — Kinesis + Lambda + IAM
     └── streaming_variables.tf                # NEW
+```
+
+**V2 (CI/CD) — additive, on top of the structure above:**
+```
+real-time-ecommerce-lakehouse/
+├── .github/
+│   └── workflows/
+│       └── terraform.yml                     # NEW — plan + apply on every push
+└── terraform/envs/dev/
+    ├── backend.tf                            # NEW — remote S3 state backend
+    └── cicd_oidc.tf                          # NEW — OIDC provider + IAM role for GitHub Actions
 ```
 
 ---
@@ -290,15 +302,88 @@ flip it to true real-time — without paying for an idle cluster.
 
 ---
 
+## 🟣 V2 — CI/CD (GitHub Actions + Terraform)
+
+> Additive on top of V1 and the Kinesis/Lambda ingestion above — automates the manual
+> `terraform plan` / `terraform apply` steps a developer would otherwise run by hand.
+
+Every push to this repository now triggers an automated pipeline:
+
+```
+git push → GitHub Actions
+   1. Authenticate to AWS via OIDC (no stored credentials)
+   2. terraform plan   — runs on every push and pull request
+   3. terraform apply  — runs only on a direct push to main
+```
+
+### Authenticating without a stored AWS key (OIDC)
+
+Rather than storing a long-lived AWS Access Key in GitHub Secrets, this project uses
+**OpenID Connect (OIDC)**: AWS is configured to trust GitHub's token service directly. On each
+workflow run, GitHub presents a short-lived, automatically-rotated token proving its identity;
+AWS exchanges it for temporary credentials (15min–1h) via `sts:AssumeRoleWithWebIdentity`. No
+AWS secret ever exists in GitHub — the same zero-static-credential principle used for the
+Databricks ↔ S3 connection, just with a different trusted party.
+
+This is provisioned in [`terraform/envs/dev/cicd_oidc.tf`](terraform/envs/dev/cicd_oidc.tf):
+
+- An **OIDC Identity Provider** registering `token.actions.githubusercontent.com` as trusted
+- An **IAM Role** (`github-actions-terraform-role`) whose trust policy restricts *who* can
+  assume it: only this exact repository, and only the `main` branch — a forked repo or a PR
+  branch could never authenticate, even knowing the role's ARN
+- **Read access** via AWS-managed `ReadOnly` policies (S3, Kinesis, Lambda) — broad but
+  inherently safe, since they only grant `Get`/`List`/`Describe` actions
+- **Write access** via a scoped custom policy, restricted to resources prefixed `rtl-dev-*` —
+  never `AdministratorAccess`
+
+### Remote state backend
+
+Terraform's state file (`terraform.tfstate`) is its memory of what already exists. Previously
+it lived only on the developer's machine — meaning GitHub Actions, running on a fresh server
+each time, had no way to know existing resources and would try to recreate them. State is now
+stored in a dedicated, versioned S3 bucket shared between local development and CI:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket = "rtl-dev-terraform-state-563683519302"
+    key    = "envs/dev/terraform.tfstate"
+    region = "eu-west-1"
+  }
+}
+```
+
+### The workflow
+
+[`.github/workflows/terraform.yml`](.github/workflows/terraform.yml) defines two jobs:
+
+| Job | Trigger | What it does |
+|---|---|---|
+| `terraform-plan` | Every push or pull request | Builds the Lambda zip, runs `terraform plan`, comments the plan on PRs |
+| `terraform-apply` | Push directly to `main` only | Same setup, then `terraform apply -auto-approve` |
+
+`terraform-apply` deliberately never runs on `pull_request` events — applying infrastructure
+changes from an unreviewed branch would defeat the purpose of having a review process at all.
+
+### What this demonstrates
+
+- End-to-end automated infrastructure deployment, not just local `terraform apply`
+- Secretless cloud authentication (OIDC) — the same pattern AWS recommends for any CI system
+- Least-privilege IAM: separating broad read access (safe) from narrow write access (scoped)
+- Awareness of remote state as a prerequisite for any multi-runner Terraform setup
+
+---
+
 ## V2 — Planned enhancements
 
 - ~~Kinesis + Lambda — real-time event-driven ingestion~~ ✅ Done (see above)
-- **CI/CD** — GitHub Actions + Databricks Asset Bundles for automated deployment
+- ~~CI/CD — GitHub Actions + Terraform automated deployment~~ ✅ Done (see above)
 - **Advanced governance** — Unity Catalog ACLs, data lineage
 - **Delta Live Tables** — declarative pipelines with data quality expectations
 - **Observability** — pipeline monitoring, freshness SLAs, alerting
 - **Scheduled near-real-time** — Databricks Job running the streaming Bronze notebook every
   1-2 minutes, as a cost-conscious middle ground between on-demand batch and 24/7 streaming
+- **Databricks Asset Bundles (DAB)** — automate notebook deployment as part of the CI/CD pipeline
 
 ---
 
