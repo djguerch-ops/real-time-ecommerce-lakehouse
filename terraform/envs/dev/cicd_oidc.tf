@@ -107,7 +107,21 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "s3:ListBucket",
           "s3:GetObject",
           "s3:PutObject",
-          "s3:DeleteObject"
+          "s3:DeleteObject",
+          # Read-only checks Terraform performs on every refresh,
+          # even when the bucket config itself isn't being changed.
+          "s3:GetAccelerateConfiguration",
+          "s3:GetBucketCORS",
+          "s3:GetBucketWebsite",
+          "s3:GetBucketLogging",
+          "s3:GetBucketObjectLockConfiguration",
+          "s3:GetBucketPolicy",
+          "s3:GetReplicationConfiguration",
+          "s3:GetLifecycleConfiguration",
+          "s3:GetEncryptionConfiguration",
+          "s3:GetBucketVersioning",
+          "s3:GetBucketPublicAccessBlock",
+          "s3:GetBucketTagging"
         ]
         Resource = [
           "arn:aws:s3:::rtl-dev-*",
@@ -123,7 +137,8 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "kinesis:DescribeStream*",
           "kinesis:ListStreams",
           "kinesis:TagResource",
-          "kinesis:AddTagsToStream"
+          "kinesis:AddTagsToStream",
+          "kinesis:ListTagsForStream"
         ]
         Resource = "arn:aws:kinesis:*:*:stream/rtl-dev-*"
       },
@@ -135,8 +150,11 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
           "lambda:GetFunction",
+          "lambda:GetFunctionCodeSigningConfig",
           "lambda:DeleteFunction",
           "lambda:TagResource",
+          "lambda:ListTags",
+          "lambda:ListVersionsByFunction",
           "lambda:CreateEventSourceMapping",
           "lambda:DeleteEventSourceMapping",
           "lambda:GetEventSourceMapping",
@@ -158,7 +176,9 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "iam:DetachRolePolicy",
           "iam:ListRolePolicies",
           "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
           "iam:TagRole",
+          "iam:ListRoleTags",
           "iam:PassRole"
         ]
         # Scoped to roles this project creates — NOT all IAM roles
@@ -166,8 +186,37 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
         # this project's naming convention.
         Resource = [
           "arn:aws:iam::*:role/databricks-s3-role",
-          "arn:aws:iam::*:role/rtl-dev-*"
+          "arn:aws:iam::*:role/rtl-dev-*",
+          "arn:aws:iam::*:role/github-actions-terraform-role"
         ]
+      },
+      {
+        Sid    = "OidcProviderManagement"
+        Effect = "Allow"
+        Action = [
+          "iam:GetOpenIDConnectProvider",
+          "iam:CreateOpenIDConnectProvider",
+          "iam:DeleteOpenIDConnectProvider",
+          "iam:UpdateOpenIDConnectProviderThumbprint",
+          "iam:TagOpenIDConnectProvider",
+          "iam:ListOpenIDConnectProviderTags"
+        ]
+        Resource = "arn:aws:iam::*:oidc-provider/token.actions.githubusercontent.com"
+      },
+      {
+        Sid    = "GithubActionsRoleSelfManagement"
+        Effect = "Allow"
+        Action = [
+          "iam:PutRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:ListRolePolicies"
+        ]
+        # Lets this same role update its own inline policy on a
+        # future terraform apply (e.g. adding more permissions
+        # later) — without this, the role could lock itself out
+        # of ever changing its own policy again.
+        Resource = "arn:aws:iam::*:role/github-actions-terraform-role"
       },
       {
         Sid    = "TerraformStateRead"
