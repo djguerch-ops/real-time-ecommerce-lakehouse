@@ -84,11 +84,35 @@ resource "aws_iam_role" "github_actions_terraform" {
 }
 
 # ---------------------------------------------------------------
+# Read-only visibility, broadly, on the services this project
+# uses. Terraform's "refresh" step reads many attributes per
+# resource (tags, encryption, versioning, ACLs...) and enumerating
+# every single read action one-by-one is impractical to maintain.
+# AWS-managed ReadOnly policies cover this safely: they grant
+# Describe/Get/List actions only — never Create/Update/Delete.
+# ---------------------------------------------------------------
+resource "aws_iam_role_policy_attachment" "github_actions_s3_read" {
+  role       = aws_iam_role.github_actions_terraform.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_kinesis_read" {
+  role       = aws_iam_role.github_actions_terraform.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonKinesisReadOnlyAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_lambda_read" {
+  role       = aws_iam_role.github_actions_terraform.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSLambda_ReadOnlyAccess"
+}
+
+# ---------------------------------------------------------------
 # Permissions granted to GitHub Actions.
 #
-# Scoped to exactly what Terraform needs to manage this project's
-# resources: S3, Kinesis, Lambda, and the IAM resources Terraform
-# itself creates/updates. Not AdministratorAccess.
+# Write/manage actions only, scoped to this project's resources
+# (S3, Kinesis, Lambda, IAM, OIDC) — not AdministratorAccess.
+# Read visibility for these services comes from the AWS-managed
+# ReadOnly policies attached above.
 # ---------------------------------------------------------------
 resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
   name = "github-actions-terraform-permissions"
@@ -98,30 +122,17 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3BucketManagement"
+        Sid    = "S3BucketWrite"
         Effect = "Allow"
         Action = [
           "s3:CreateBucket",
-          "s3:GetBucket*",
           "s3:PutBucket*",
-          "s3:ListBucket",
-          "s3:GetObject",
+          "s3:DeleteBucket*",
           "s3:PutObject",
           "s3:DeleteObject",
-          # Read-only checks Terraform performs on every refresh,
-          # even when the bucket config itself isn't being changed.
-          "s3:GetAccelerateConfiguration",
-          "s3:GetBucketCORS",
-          "s3:GetBucketWebsite",
-          "s3:GetBucketLogging",
-          "s3:GetBucketObjectLockConfiguration",
-          "s3:GetBucketPolicy",
-          "s3:GetReplicationConfiguration",
-          "s3:GetLifecycleConfiguration",
-          "s3:GetEncryptionConfiguration",
-          "s3:GetBucketVersioning",
-          "s3:GetBucketPublicAccessBlock",
-          "s3:GetBucketTagging"
+          "s3:PutEncryptionConfiguration",
+          "s3:PutBucketVersioning",
+          "s3:PutBucketPublicAccessBlock"
         ]
         Resource = [
           "arn:aws:s3:::rtl-dev-*",
@@ -129,44 +140,37 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
         ]
       },
       {
-        Sid    = "KinesisManagement"
+        Sid    = "KinesisWrite"
         Effect = "Allow"
         Action = [
           "kinesis:CreateStream",
           "kinesis:DeleteStream",
-          "kinesis:DescribeStream*",
-          "kinesis:ListStreams",
           "kinesis:TagResource",
           "kinesis:AddTagsToStream",
-          "kinesis:ListTagsForStream"
+          "kinesis:RemoveTagsFromStream"
         ]
         Resource = "arn:aws:kinesis:*:*:stream/rtl-dev-*"
       },
       {
-        Sid    = "LambdaManagement"
+        Sid    = "LambdaFunctionWrite"
         Effect = "Allow"
         Action = [
           "lambda:CreateFunction",
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
-          "lambda:GetFunction",
-          "lambda:GetFunctionCodeSigningConfig",
           "lambda:DeleteFunction",
           "lambda:TagResource",
-          "lambda:ListTags",
-          "lambda:ListVersionsByFunction"
+          "lambda:UntagResource"
         ]
         Resource = "arn:aws:lambda:*:*:function:rtl-dev-*"
       },
       {
-        Sid    = "LambdaEventSourceMapping"
+        Sid    = "LambdaEventSourceMappingWrite"
         Effect = "Allow"
         Action = [
           "lambda:CreateEventSourceMapping",
           "lambda:DeleteEventSourceMapping",
-          "lambda:GetEventSourceMapping",
-          "lambda:UpdateEventSourceMapping",
-          "lambda:ListEventSourceMappings"
+          "lambda:UpdateEventSourceMapping"
         ]
         # Event source mappings are a distinct resource type from
         # Lambda functions, with their own ARN format — they can't
@@ -213,29 +217,6 @@ resource "aws_iam_role_policy" "github_actions_terraform_permissions" {
           "iam:ListOpenIDConnectProviderTags"
         ]
         Resource = "arn:aws:iam::*:oidc-provider/token.actions.githubusercontent.com"
-      },
-      {
-        Sid    = "GithubActionsRoleSelfManagement"
-        Effect = "Allow"
-        Action = [
-          "iam:PutRolePolicy",
-          "iam:GetRolePolicy",
-          "iam:DeleteRolePolicy",
-          "iam:ListRolePolicies"
-        ]
-        # Lets this same role update its own inline policy on a
-        # future terraform apply (e.g. adding more permissions
-        # later) — without this, the role could lock itself out
-        # of ever changing its own policy again.
-        Resource = "arn:aws:iam::*:role/github-actions-terraform-role"
-      },
-      {
-        Sid    = "TerraformStateRead"
-        Effect = "Allow"
-        Action = [
-          "s3:GetBucketLocation"
-        ]
-        Resource = "*"
       }
     ]
   })
