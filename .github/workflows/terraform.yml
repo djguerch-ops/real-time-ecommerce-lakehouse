@@ -46,6 +46,12 @@ jobs:
         with:
           terraform_version: "1.9.0"
 
+      - name: Build Lambda deployment package
+        run: |
+          mkdir -p src/lambda/kinesis_to_s3/build
+          cd src/lambda/kinesis_to_s3
+          zip -j build/lambda.zip handler.py
+
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform init
@@ -109,6 +115,12 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
+
+      - name: Build Lambda deployment package
+        run: |
+          mkdir -p src/lambda/kinesis_to_s3/build
+          cd src/lambda/kinesis_to_s3
+          zip -j build/lambda.zip handler.py
 
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
