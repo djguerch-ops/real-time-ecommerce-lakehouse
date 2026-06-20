@@ -100,7 +100,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: terraform-plan
     runs-on: ubuntu-latest
-    environment: production # optional manual-approval gate, see README
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
