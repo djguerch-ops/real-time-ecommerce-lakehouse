@@ -54,7 +54,8 @@ event_schema = StructType([
     StructField("currency",    StringType(),  False),
 ])
 
-S3_PATH = "s3://rtl-dev-raw-563683519302/events/"
+# Set in the DLT pipeline configuration: raw_bucket = rtl-dev-raw-<account-id>
+S3_PATH = f"s3://{spark.conf.get('raw_bucket')}/events/"
 
 # COMMAND ----------
 

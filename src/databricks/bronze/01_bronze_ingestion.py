@@ -9,9 +9,14 @@
 
 # COMMAND ----------
 
+# Bucket passed as a notebook / job parameter (no account-specific value hardcoded)
+dbutils.widgets.text("raw_bucket", "", "Raw S3 bucket (e.g. rtl-dev-raw-<account-id>)")
+raw_bucket = dbutils.widgets.get("raw_bucket")
+assert raw_bucket, "Set the 'raw_bucket' widget before running"
+
 # Paths resolved via the Unity Catalog External Location
-s3_path = "s3://rtl-dev-raw-563683519302/events/"
-checkpoint_path = "s3://rtl-dev-raw-563683519302/checkpoints/bronze/"
+s3_path = f"s3://{raw_bucket}/events/"
+checkpoint_path = f"s3://{raw_bucket}/checkpoints/bronze/"
 
 print(f"Source : {s3_path}")
 print(f"Checkpoint : {checkpoint_path}")
